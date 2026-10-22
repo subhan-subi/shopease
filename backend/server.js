@@ -3,7 +3,6 @@ dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
 import express from "express";
 import http from "http";
-import { Server } from "socket.io";
 import mongoose from "mongoose";
 import dotenv from "dotenv";
 import cors from "cors";
@@ -24,46 +23,51 @@ import adminEmailRoutes from "./routes/adminEmailRoutes.js";
 
 dotenv.config();
 
-// Verify critical environment secrets at startup
+// ==========================================
+// ENVIRONMENT VALIDATION
+// Warn (don't exit) so Vercel can still import the module.
+// Requests will fail gracefully with 503/401 if env vars are missing.
+// ==========================================
 if (!process.env.JWT_SECRET) {
-  console.error("FATAL ERROR: JWT_SECRET environment variable is missing.");
-  process.exit(1);
+  console.error("WARNING: JWT_SECRET environment variable is missing. Auth routes will fail.");
 }
 if (!process.env.MONGO_URI) {
-  console.error("FATAL ERROR: MONGO_URI environment variable is missing.");
-  process.exit(1);
+  console.error("WARNING: MONGO_URI environment variable is missing. DB will not connect.");
 }
 
 const app = express();
-
-const server = http.createServer(app);
 
 // ==========================================
 // CORS CONFIGURATION
 // ==========================================
 const clientUrl = process.env.CLIENT_URL || "http://localhost:5173";
+const frontendUrl = process.env.FRONTEND_URL || "";
 const allowedOrigins = [
   clientUrl,
+  frontendUrl,
   "http://localhost:5173",
   "http://127.0.0.1:5173",
   "http://localhost:5000",
-];
+].filter(Boolean);
 
 const corsOptions = {
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else if (process.env.NODE_ENV !== "production") {
-      callback(null, true);
-    } else {
-      callback(new Error("CORS policy violation: Access denied for this origin."));
+    // Allow requests with no origin (curl, Postman, mobile apps, server-to-server)
+    if (!origin) {
+      return callback(null, true);
     }
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    if (process.env.NODE_ENV !== "production") {
+      return callback(null, true);
+    }
+    callback(new Error("CORS policy violation: Access denied for this origin."));
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 };
-
 
 app.use(cors(corsOptions));
 app.use(helmet());
@@ -81,18 +85,20 @@ app.use((req, res, next) => {
   next();
 });
 
-
 // Safe Trust Proxy configuration (if behind reverse proxy like Nginx/Cloudflare/Render)
 if (process.env.TRUST_PROXY) {
   const tp = process.env.TRUST_PROXY;
   app.set("trust proxy", tp === "true" ? 1 : isNaN(Number(tp)) ? tp : Number(tp));
+} else if (process.env.NODE_ENV === "production") {
+  // Vercel always sits behind a proxy — enable trust proxy automatically in production
+  app.set("trust proxy", 1);
 }
 
 // Rate Limiting - Global API Limiter
 const isDev = process.env.NODE_ENV !== "production";
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: isDev ? 10000 : 1500, // Generous dev limit, protective 100 req/min in prod
+  max: isDev ? 10000 : 1500, // Generous dev limit, protective limit in prod
   message: {
     success: false,
     message: "Too many requests. Please try again later.",
@@ -104,30 +110,78 @@ app.use("/api/", apiLimiter);
 
 // ==========================================
 // SOCKET.IO (Real-time updates)
+// Socket.IO is only initialized in local development.
+// Vercel serverless functions do not support persistent WebSocket connections.
 // ==========================================
-const io = new Server(server, {
-  cors: {
-    origin: allowedOrigins,
-    credentials: true,
-  },
-});
+let io = null;
+let localServer = null;
 
-io.on("connection", (socket) => {
-  console.log("Client connected via Socket.io:", socket.id);
+const isVercel = !!process.env.VERCEL;
 
-  socket.on("join-admin", () => {
-    socket.join("admin-room");
+if (!isVercel) {
+  const { Server } = await import("socket.io");
+  localServer = http.createServer(app);
+
+  io = new Server(localServer, {
+    cors: {
+      origin: allowedOrigins,
+      credentials: true,
+    },
   });
 
-  socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
-  });
-});
+  io.on("connection", (socket) => {
+    console.log("Client connected via Socket.io:", socket.id);
 
-// Attach io to req for controllers if needed
+    socket.on("join-admin", () => {
+      socket.join("admin-room");
+    });
+
+    socket.on("disconnect", () => {
+      console.log("Client disconnected:", socket.id);
+    });
+  });
+}
+
+// Attach io to req for controllers if needed (null-safe in serverless)
 app.use((req, res, next) => {
   req.io = io;
   next();
+});
+
+// ==========================================
+// LAZY MONGODB CONNECTION WITH CACHING
+// Vercel serverless: reuse the connection across warm function invocations.
+// ==========================================
+let isDbConnected = false;
+
+const connectDB = async () => {
+  if (isDbConnected && mongoose.connection.readyState === 1) return;
+
+  if (!process.env.MONGO_URI) {
+    throw new Error("MONGO_URI environment variable is not set.");
+  }
+
+  await mongoose.connect(process.env.MONGO_URI, {
+    serverSelectionTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+  });
+
+  isDbConnected = true;
+  console.log("MongoDB connected ✅");
+};
+
+// Middleware: ensure DB is ready before any route handler executes
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    console.error("DB connection error:", err.message);
+    res.status(503).json({
+      success: false,
+      message: "Database unavailable. Please try again shortly.",
+    });
+  }
 });
 
 // ==========================================
@@ -174,21 +228,28 @@ app.use((err, req, res, next) => {
 });
 
 // ==========================================
-// DATABASE + SERVER STARTUP
+// LOCAL DEVELOPMENT SERVER STARTUP
+// Vercel manages its own HTTP server lifecycle — do NOT call listen() when running on Vercel.
 // ==========================================
-const PORT = process.env.PORT || 5000;
+if (!isVercel) {
+  const PORT = process.env.PORT || 5000;
 
-mongoose
-  .connect(process.env.MONGO_URI)
-  .then(() => {
-    console.log("MongoDB connected successfully ✅");
-
-    server.listen(PORT, () => {
-      console.log(`Server running on http://localhost:${PORT} 🚀`);
+  connectDB()
+    .then(() => {
+      localServer.listen(PORT, () => {
+        console.log(`Server running on http://localhost:${PORT} 🚀`);
+      });
+    })
+    .catch((error) => {
+      console.error("MongoDB connection failed:", error);
+      process.exit(1);
     });
-  })
-  .catch((error) => {
-    console.error("MongoDB connection failed:", error);
-  });
+}
 
-export { app, io };
+// ==========================================
+// EXPORTS
+// Vercel requires the DEFAULT export to be the Express app (a handler function).
+// Named export of `io` is preserved for any local consumers.
+// ==========================================
+export { io };
+export default app;
