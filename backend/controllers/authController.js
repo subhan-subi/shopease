@@ -127,14 +127,20 @@ export const register = async (req, res) => {
       emailVerificationExpires: verificationExpires,
     });
 
-    // Temporary verification URL
+    // Construct verification URL using configured backend base URL
+    const backendBaseUrl =
+      process.env.BACKEND_URL ||
+      process.env.CLIENT_URL ||
+      process.env.FRONTEND_URL ||
+      "http://localhost:5000";
     const verificationUrl =
-      `http://localhost:5000/api/auth/verify-email/${verificationToken}`;
+      `${backendBaseUrl.replace(/\/$/, "")}/api/auth/verify-email/${verificationToken}`;
 
     console.log("========================================");
     console.log("EMAIL VERIFICATION URL:");
     console.log(verificationUrl);
     console.log("========================================");
+
 
     return res.status(201).json({
       success: true,
