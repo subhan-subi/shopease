@@ -24,6 +24,46 @@
       "dest": "backend/server.js"
     },
     {
+      "src": "/products(.*)",
+      "dest": "backend/server.js"
+    },
+    {
+      "src": "/categories(.*)",
+      "dest": "backend/server.js"
+    },
+    {
+      "src": "/auth(.*)",
+      "dest": "backend/server.js"
+    },
+    {
+      "src": "/cart(.*)",
+      "dest": "backend/server.js"
+    },
+    {
+      "src": "/wishlist(.*)",
+      "dest": "backend/server.js"
+    },
+    {
+      "src": "/orders(.*)",
+      "dest": "backend/server.js"
+    },
+    {
+      "src": "/notifications(.*)",
+      "dest": "backend/server.js"
+    },
+    {
+      "src": "/reviews(.*)",
+      "dest": "backend/server.js"
+    },
+    {
+      "src": "/admin(.*)",
+      "dest": "backend/server.js"
+    },
+    {
+      "src": "/health",
+      "dest": "backend/server.js"
+    },
+    {
       "src": "/assets/(.*)",
       "dest": "/assets/$1"
     },
@@ -37,5 +77,3 @@
     }
   ]
 }
-
-

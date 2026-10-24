@@ -353,7 +353,8 @@ app.use((err, req, res, next) => {
 // ==========================================
 // LOCAL DEVELOPMENT SERVER STARTUP
 // ==========================================
-if (!isVercel) {
+const isDirectRun = process.argv[1] ? path.resolve(process.argv[1]) === path.resolve(__filename) : false;
+if (!isVercel && isDirectRun) {
   const PORT = process.env.PORT || 5000;
 
   connectDB()
