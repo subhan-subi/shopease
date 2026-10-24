@@ -1,6 +1,6 @@
+import path from "path";
+import { fileURLToPath } from "url";
 import dns from "dns";
-dns.setServers(["8.8.8.8", "1.1.1.1"]);
-
 import express from "express";
 import http from "http";
 import { Server as SocketServer } from "socket.io";
@@ -22,18 +22,34 @@ import notificationRoutes from "./routes/notificationRoutes.js";
 import reviewRoutes from "./routes/reviewRoutes.js";
 import adminEmailRoutes from "./routes/adminEmailRoutes.js";
 
-dotenv.config();
+// ==========================================
+// ENVIRONMENT SETUP
+// ==========================================
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// ==========================================
-// ENVIRONMENT VALIDATION
-// Warn (don't exit) so Vercel can still import the module.
-// Requests will fail gracefully with 503/401 if env vars are missing.
-// ==========================================
-if (!process.env.JWT_SECRET) {
-  console.error("WARNING: JWT_SECRET environment variable is missing. Auth routes will fail.");
+// Ensure backend .env is loaded regardless of process cwd
+dotenv.config({ path: path.resolve(__dirname, ".env") });
+dotenv.config(); // fallback to cwd .env
+
+const isVercel = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+
+// Only configure fallback DNS in local development.
+// In AWS Lambda / Vercel, overriding DNS to 8.8.8.8 fails because outbound UDP port 53 is blocked.
+if (!isVercel && process.env.NODE_ENV !== "production") {
+  try {
+    dns.setServers(["8.8.8.8", "1.1.1.1"]);
+  } catch (dnsErr) {
+    console.warn("Could not set local custom DNS:", dnsErr.message);
+  }
 }
-if (!process.env.MONGO_URI) {
-  console.error("WARNING: MONGO_URI environment variable is missing. DB will not connect.");
+
+// Environment validation
+if (!process.env.JWT_SECRET) {
+  console.warn("WARNING: JWT_SECRET environment variable is missing. Authentication routes will fail.");
+}
+if (!process.env.MONGO_URI && !process.env.MONGODB_URI) {
+  console.warn("WARNING: MONGO_URI / MONGODB_URI environment variable is missing.");
 }
 
 const app = express();
@@ -41,42 +57,85 @@ const app = express();
 // ==========================================
 // CORS CONFIGURATION
 // ==========================================
-const clientUrl = process.env.CLIENT_URL || "http://localhost:5173";
-const frontendUrl = process.env.FRONTEND_URL || "";
-const allowedOrigins = [
-  clientUrl,
-  frontendUrl,
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "http://localhost:5000",
-].filter(Boolean);
+const normalizeOrigin = (url) => (url ? url.trim().replace(/\/+$/, "") : "");
+
+const configuredOrigins = new Set(
+  [
+    "https://shopease-8fpe.vercel.app",
+    normalizeOrigin(process.env.FRONTEND_URL),
+    normalizeOrigin(process.env.CLIENT_URL),
+    ...(process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",").map(normalizeOrigin) : []),
+    ...(process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(",").map(normalizeOrigin) : []),
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://localhost:5000",
+  ].filter(Boolean)
+);
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no origin (curl, Postman, mobile apps, server-to-server)
+    // Allow non-browser requests (Postman, curl, server-to-server, mobile apps)
     if (!origin) {
       return callback(null, true);
     }
-    if (allowedOrigins.includes(origin)) {
+
+    const cleanOrigin = normalizeOrigin(origin);
+
+    if (
+      configuredOrigins.has(cleanOrigin) ||
+      cleanOrigin === "https://shopease-8fpe.vercel.app" ||
+      /^https:\/\/shopease-8fpe(-[a-z0-9-]+)?\.vercel\.app$/.test(cleanOrigin) ||
+      cleanOrigin.endsWith(".vercel.app") ||
+      process.env.NODE_ENV !== "production"
+    ) {
       return callback(null, true);
     }
-    if (process.env.NODE_ENV !== "production") {
-      return callback(null, true);
-    }
-    callback(new Error("CORS policy violation: Access denied for this origin."));
+
+    console.warn(`[CORS] Rejected unlisted origin: ${origin}`);
+    return callback(null, false);
   },
   credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+  allowedHeaders: [
+    "Origin",
+    "X-Requested-With",
+    "Content-Type",
+    "Accept",
+    "Authorization",
+    "Access-Control-Request-Method",
+    "Access-Control-Request-Headers",
+  ],
+  exposedHeaders: ["Content-Length", "X-Vercel-Id", "Authorization"],
+  maxAge: 86400,
+  optionsSuccessStatus: 204,
 };
 
+// Enable CORS for all incoming requests and preflight OPTIONS
 app.use(cors(corsOptions));
-app.use(helmet());
+// Express 5 (path-to-regexp v8) requires named wildcards — bare "*" throws at startup
+app.options("/{*path}", cors(corsOptions));
+
+// Explicit preflight handler to guarantee instant 204 response without hitting DB or rate limiters
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+  next();
+});
+
+// Configure Helmet with cross-origin resource sharing support
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    crossOriginOpenerPolicy: false,
+  })
+);
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// Express 5 compatible MongoDB injection sanitization (in-place mutation without reassigning req.query getter)
+// Express 5 compatible MongoDB injection sanitization
 app.use((req, res, next) => {
   ["body", "params", "headers", "query"].forEach((key) => {
     if (req[key]) {
@@ -86,47 +145,41 @@ app.use((req, res, next) => {
   next();
 });
 
-// Safe Trust Proxy configuration (if behind reverse proxy like Nginx/Cloudflare/Render)
+// Trust proxy for Vercel / reverse proxies
 if (process.env.TRUST_PROXY) {
   const tp = process.env.TRUST_PROXY;
   app.set("trust proxy", tp === "true" ? 1 : isNaN(Number(tp)) ? tp : Number(tp));
-} else if (process.env.NODE_ENV === "production") {
-  // Vercel always sits behind a proxy — enable trust proxy automatically in production
+} else {
   app.set("trust proxy", 1);
 }
 
-// Rate Limiting - Global API Limiter
+// Rate Limiting - Global API Limiter (skips preflights)
 const isDev = process.env.NODE_ENV !== "production";
 const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: isDev ? 10000 : 1500, // Generous dev limit, protective limit in prod
+  windowMs: 15 * 60 * 1000,
+  max: isDev ? 10000 : 1500,
   message: {
     success: false,
     message: "Too many requests. Please try again later.",
   },
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => req.method === "OPTIONS",
 });
 app.use("/api/", apiLimiter);
 
 // ==========================================
-// SOCKET.IO (Real-time updates)
-// Socket.IO is only initialized in local development.
-// Vercel serverless functions do not support persistent WebSocket connections.
+// SOCKET.IO (Local Development)
 // ==========================================
 let io = null;
 let localServer = null;
 
-const isVercel = !!process.env.VERCEL;
-
 if (!isVercel) {
-  // Socket.IO only runs in local development.
-  // Vercel serverless does not support persistent WebSocket connections.
   localServer = http.createServer(app);
 
   io = new SocketServer(localServer, {
     cors: {
-      origin: allowedOrigins,
+      origin: Array.from(configuredOrigins),
       credentials: true,
     },
   });
@@ -151,29 +204,82 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// LAZY MONGODB CONNECTION WITH CACHING
-// Vercel serverless: reuse the connection across warm function invocations.
+// MONGODB CONNECTION WITH CACHING & FALLBACK
 // ==========================================
 let isDbConnected = false;
+let dbConnectingPromise = null;
+
+const directFallbackUri =
+  "mongodb://Muhammad_Subhan:Subhan123456@ac-zjqpnkp-shard-00-00.3xfhbmo.mongodb.net:27017,ac-zjqpnkp-shard-00-01.3xfhbmo.mongodb.net:27017,ac-zjqpnkp-shard-00-02.3xfhbmo.mongodb.net:27017/shopease?ssl=true&replicaSet=atlas-a508fn-shard-0&authSource=admin&appName=Cluster0";
 
 const connectDB = async () => {
-  if (isDbConnected && mongoose.connection.readyState === 1) return;
-
-  if (!process.env.MONGO_URI) {
-    throw new Error("MONGO_URI environment variable is not set.");
+  if (mongoose.connection.readyState === 1) {
+    isDbConnected = true;
+    return;
   }
 
-  await mongoose.connect(process.env.MONGO_URI, {
-    serverSelectionTimeoutMS: 10000,
-    socketTimeoutMS: 45000,
-  });
+  // Reuse in-flight connection promise across concurrent cold-start requests
+  if (dbConnectingPromise) {
+    return dbConnectingPromise;
+  }
 
-  isDbConnected = true;
-  console.log("MongoDB connected ✅");
+  const primaryUri =
+    process.env.MONGO_URI ||
+    process.env.MONGODB_URI ||
+    directFallbackUri;
+
+  const connectOptions = {
+    serverSelectionTimeoutMS: 8000,
+    socketTimeoutMS: 45000,
+    maxPoolSize: 10,
+    minPoolSize: 0,
+  };
+
+  dbConnectingPromise = (async () => {
+    try {
+      await mongoose.connect(primaryUri, connectOptions);
+      isDbConnected = true;
+      console.log("MongoDB connected successfully ✅");
+    } catch (primaryErr) {
+      console.warn("Primary MongoDB connection failed:", primaryErr.message);
+
+      // If SRV DNS resolution fails, automatically retry with the direct replica-set URI
+      if (
+        directFallbackUri &&
+        primaryUri !== directFallbackUri &&
+        (primaryErr.message.includes("querySrv") ||
+          primaryErr.message.includes("ENOTFOUND") ||
+          primaryErr.message.includes("ECONNREFUSED") ||
+          primaryErr.message.includes("ETIMEDOUT"))
+      ) {
+        console.log("Retrying with direct replica-set MongoDB connection...");
+        await mongoose.connect(directFallbackUri, connectOptions);
+        isDbConnected = true;
+        console.log("MongoDB connected via direct replica-set fallback ✅");
+      } else {
+        throw primaryErr;
+      }
+    } finally {
+      dbConnectingPromise = null;
+    }
+  })();
+
+  return dbConnectingPromise;
 };
 
-// Middleware: ensure DB is ready before any route handler executes
+// Middleware: ensure DB is ready before request handlers execute.
+// Exclude preflight OPTIONS and health check endpoints so they always respond immediately.
 app.use(async (req, res, next) => {
+  if (
+    req.method === "OPTIONS" ||
+    req.path === "/" ||
+    req.path === "/health" ||
+    req.path === "/api" ||
+    req.path === "/api/health"
+  ) {
+    return next();
+  }
+
   try {
     await connectDB();
     next();
@@ -182,32 +288,47 @@ app.use(async (req, res, next) => {
     res.status(503).json({
       success: false,
       message: "Database unavailable. Please try again shortly.",
+      error: process.env.NODE_ENV === "development" ? err.message : undefined,
     });
   }
 });
 
 // ==========================================
-// ROUTES
+// ROUTES (Mounted for both /api/* and root /*)
 // ==========================================
-app.use("/api/auth", authRoutes);
-app.use("/api/products", productRoutes);
-app.use("/api/categories", categoryRoutes);
-app.use("/api/cart", cartRoutes);
-app.use("/api/wishlist", wishlistRoutes);
-app.use("/api/orders", orderRoutes);
-app.use("/api/notifications", notificationRoutes);
-app.use("/api/reviews", reviewRoutes);
-app.use("/api/admin/email", adminEmailRoutes);
+const mountRoutes = (prefix = "") => {
+  app.use(`${prefix}/auth`, authRoutes);
+  app.use(`${prefix}/products`, productRoutes);
+  app.use(`${prefix}/categories`, categoryRoutes);
+  app.use(`${prefix}/cart`, cartRoutes);
+  app.use(`${prefix}/wishlist`, wishlistRoutes);
+  app.use(`${prefix}/orders`, orderRoutes);
+  app.use(`${prefix}/notifications`, notificationRoutes);
+  app.use(`${prefix}/reviews`, reviewRoutes);
+  app.use(`${prefix}/admin/email`, adminEmailRoutes);
+};
+
+// Support requests with or without /api prefix
+mountRoutes("/api");
+mountRoutes("");
 
 // ==========================================
 // HEALTH CHECK
 // ==========================================
-app.get("/", (req, res) => {
-  res.json({
+const healthHandler = (req, res) => {
+  res.status(200).json({
     success: true,
     message: "ShopEase backend is running 🚀",
+    database: mongoose.connection.readyState === 1 ? "connected" : "connecting/idle",
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || "production",
   });
-});
+};
+
+app.get("/", healthHandler);
+app.get("/health", healthHandler);
+app.get("/api", healthHandler);
+app.get("/api/health", healthHandler);
 
 // 404 Route handler
 app.use((req, res) => {
@@ -231,7 +352,6 @@ app.use((err, req, res, next) => {
 
 // ==========================================
 // LOCAL DEVELOPMENT SERVER STARTUP
-// Vercel manages its own HTTP server lifecycle — do NOT call listen() when running on Vercel.
 // ==========================================
 if (!isVercel) {
   const PORT = process.env.PORT || 5000;
@@ -243,15 +363,15 @@ if (!isVercel) {
       });
     })
     .catch((error) => {
-      console.error("MongoDB connection failed:", error);
-      process.exit(1);
+      console.error("MongoDB connection failed at local startup:", error.message);
+      localServer.listen(PORT, () => {
+        console.log(`Server running on http://localhost:${PORT} (Database offline) ⚠️`);
+      });
     });
 }
 
 // ==========================================
 // EXPORTS
-// Vercel requires the DEFAULT export to be the Express app (a handler function).
-// Named export of `io` is preserved for any local consumers.
 // ==========================================
-export { io };
+export { io, connectDB };
 export default app;

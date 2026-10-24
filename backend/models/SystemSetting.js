@@ -35,7 +35,7 @@ const systemSettingSchema = new mongoose.Schema(
   }
 );
 
-// Prevent duplicate settings documents for the same key
-systemSettingSchema.index({ key: 1 }, { unique: true });
+// Note: `unique: true` on the `key` field already creates a unique index;
+// the explicit index() call below is intentionally removed to avoid the duplicate.
 
 export default mongoose.model("SystemSetting", systemSettingSchema);
