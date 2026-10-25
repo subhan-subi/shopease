@@ -2,11 +2,11 @@ import mongoose from "mongoose";
 
 const connectDB = async () => {
     try {
-        const uri = process.env.MONGO_URI || process.env.MONGODB_URI;
+        const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
 
-        console.log("URI exists:", !!uri);
-        console.log("URI starts with:", uri?.substring(0, 20));
-        console.log("URI ends with:", uri?.slice(-30));
+        if (!uri) {
+            throw new Error("MONGODB_URI is not defined in environment variables.");
+        }
 
         const connection = await mongoose.connect(uri);
 

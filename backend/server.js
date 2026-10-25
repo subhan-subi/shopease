@@ -48,8 +48,8 @@ if (!isVercel && process.env.NODE_ENV !== "production") {
 if (!process.env.JWT_SECRET) {
   console.warn("WARNING: JWT_SECRET environment variable is missing. Authentication routes will fail.");
 }
-if (!process.env.MONGO_URI && !process.env.MONGODB_URI) {
-  console.warn("WARNING: MONGO_URI / MONGODB_URI environment variable is missing.");
+if (!process.env.MONGODB_URI && !process.env.MONGO_URI) {
+  console.warn("WARNING: MONGODB_URI (or MONGO_URI) environment variable is missing.");
 }
 
 const app = express();
@@ -209,8 +209,9 @@ app.use((req, res, next) => {
 let isDbConnected = false;
 let dbConnectingPromise = null;
 
+// Optional direct replica-set fallback URI loaded strictly from environment (no hardcoded secrets)
 const directFallbackUri =
-  "mongodb://Muhammad_Subhan:Subhan123456@ac-zjqpnkp-shard-00-00.3xfhbmo.mongodb.net:27017,ac-zjqpnkp-shard-00-01.3xfhbmo.mongodb.net:27017,ac-zjqpnkp-shard-00-02.3xfhbmo.mongodb.net:27017/shopease?ssl=true&replicaSet=atlas-a508fn-shard-0&authSource=admin&appName=Cluster0";
+  process.env.MONGODB_DIRECT_URI || process.env.MONGO_DIRECT_URI || null;
 
 const connectDB = async () => {
   if (mongoose.connection.readyState === 1) {
@@ -223,10 +224,14 @@ const connectDB = async () => {
     return dbConnectingPromise;
   }
 
-  const primaryUri =
-    process.env.MONGO_URI ||
-    process.env.MONGODB_URI ||
-    directFallbackUri;
+  const primaryUri = process.env.MONGODB_URI || process.env.MONGO_URI;
+
+  if (!primaryUri) {
+    const errorMsg =
+      "Database configuration error: Neither MONGODB_URI nor MONGO_URI is defined in environment variables.";
+    console.error(errorMsg);
+    throw new Error(errorMsg);
+  }
 
   const connectOptions = {
     serverSelectionTimeoutMS: 8000,
@@ -243,7 +248,7 @@ const connectDB = async () => {
     } catch (primaryErr) {
       console.warn("Primary MongoDB connection failed:", primaryErr.message);
 
-      // If SRV DNS resolution fails, automatically retry with the direct replica-set URI
+      // If SRV DNS resolution fails, automatically retry with the direct replica-set URI if configured
       if (
         directFallbackUri &&
         primaryUri !== directFallbackUri &&
@@ -252,7 +257,7 @@ const connectDB = async () => {
           primaryErr.message.includes("ECONNREFUSED") ||
           primaryErr.message.includes("ETIMEDOUT"))
       ) {
-        console.log("Retrying with direct replica-set MongoDB connection...");
+        console.log("Retrying with direct replica-set MongoDB connection from environment...");
         await mongoose.connect(directFallbackUri, connectOptions);
         isDbConnected = true;
         console.log("MongoDB connected via direct replica-set fallback ✅");
