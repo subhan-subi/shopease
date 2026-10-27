@@ -5,6 +5,7 @@ import {
   register,
   login,
   verifyEmail,
+  resendVerificationEmail,
   forgotPassword,
   resetPassword,
   updateProfile,
@@ -34,6 +35,14 @@ const registerLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+const resendVerificationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { success: false, message: "Too many verification requests. Please try again after 15 minutes." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 const forgotPasswordLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
@@ -57,6 +66,7 @@ router.post("/register", registerLimiter, register);
 router.post("/login", loginLimiter, login);
 router.post("/google", googleAuthLimiter, googleAuth);
 router.get("/verify-email/:token", verifyEmail);
+router.post("/resend-verification", resendVerificationLimiter, resendVerificationEmail);
 router.post("/forgot-password", forgotPasswordLimiter, forgotPassword);
 router.post("/reset-password/:token", forgotPasswordLimiter, resetPassword);
 
