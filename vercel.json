@@ -40,10 +40,6 @@
       "dest": "backend/server.js"
     },
     {
-      "src": "/wishlist(.*)",
-      "dest": "backend/server.js"
-    },
-    {
       "src": "/orders(.*)",
       "dest": "backend/server.js"
     },
