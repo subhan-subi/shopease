@@ -3,7 +3,105 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import https from "https";
 import User from "../models/User.js";
-import { sendPasswordResetEmail } from "../utils/emailService.js";
+import {
+  sendPasswordResetEmail,
+  sendVerificationEmail,
+} from "../utils/emailService.js";
+
+// Helper: Resolve backend base URL for verification links
+const getBackendBaseUrl = (req) => {
+  if (process.env.BACKEND_URL) {
+    return process.env.BACKEND_URL.replace(/\/$/, "");
+  }
+  if (req && req.get) {
+    const proto = req.headers["x-forwarded-proto"] || req.protocol || "http";
+    const host = req.get("host");
+    if (host) {
+      return `${proto}://${host}`;
+    }
+  }
+  return (
+    process.env.CLIENT_URL ||
+    process.env.FRONTEND_URL ||
+    `http://localhost:${process.env.PORT || 5000}`
+  ).replace(/\/$/, "");
+};
+
+// Helper: Render HTML verification confirmation/failure page for browser visits
+const renderVerificationPage = ({ success, title, message, loginUrl }) => `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title} - ShopEase</title>
+  ${success ? `<meta http-equiv="refresh" content="5;url=${loginUrl}">` : ""}
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .card {
+      background: #1e293b;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 16px;
+      padding: 40px 32px;
+      max-width: 480px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+    }
+    .icon {
+      font-size: 48px;
+      margin-bottom: 20px;
+    }
+    h1 {
+      font-size: 24px;
+      font-weight: 700;
+      color: ${success ? "#10b981" : "#ef4444"};
+      margin-bottom: 12px;
+    }
+    p {
+      color: #94a3b8;
+      font-size: 15px;
+      line-height: 1.6;
+      margin-bottom: 28px;
+    }
+    .btn {
+      display: inline-block;
+      background: linear-gradient(135deg, #ff6b00, #e05e00);
+      color: #ffffff;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 15px;
+      padding: 12px 32px;
+      border-radius: 8px;
+      transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.9; }
+    .auto-redirect {
+      margin-top: 16px;
+      font-size: 12px;
+      color: #64748b;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">${success ? "✅" : "⚠️"}</div>
+    <h1>${title}</h1>
+    <p>${message}</p>
+    <a href="${loginUrl}" class="btn">Proceed to Sign In</a>
+    ${success ? '<div class="auto-redirect">Redirecting automatically in 5 seconds...</div>' : ""}
+  </div>
+</body>
+</html>`;
 
 // ==========================================
 // HELPER: Verify Firebase ID Token
@@ -127,20 +225,34 @@ export const register = async (req, res) => {
       emailVerificationExpires: verificationExpires,
     });
 
-    // Construct verification URL using configured backend base URL
-    const backendBaseUrl =
-      process.env.BACKEND_URL ||
-      process.env.CLIENT_URL ||
-      process.env.FRONTEND_URL ||
-      "http://localhost:5000";
+    // Construct verification URL
+    const backendBaseUrl = getBackendBaseUrl(req);
     const verificationUrl =
-      `${backendBaseUrl.replace(/\/$/, "")}/api/auth/verify-email/${verificationToken}`;
+      `${backendBaseUrl}/api/auth/verify-email/${verificationToken}`;
 
     console.log("========================================");
     console.log("EMAIL VERIFICATION URL:");
     console.log(verificationUrl);
     console.log("========================================");
 
+    // Dispatch branded verification email via SMTP
+    try {
+      const emailResult = await sendVerificationEmail({
+        to: user.email,
+        verifyUrl: verificationUrl,
+        userName: user.fullName || "Valued Customer",
+      });
+
+      if (!emailResult.success) {
+        console.error(
+          "[AUTH] Verification email dispatch failed:",
+          emailResult.errorCode,
+          emailResult.errorDetail || emailResult.message
+        );
+      }
+    } catch (emailErr) {
+      console.error("[AUTH] Unexpected error dispatching verification email:", emailErr.message);
+    }
 
     return res.status(201).json({
       success: true,
@@ -171,8 +283,24 @@ export const register = async (req, res) => {
 export const verifyEmail = async (req, res) => {
   try {
     const { token } = req.params;
+    const isHtmlRequest = Boolean(req.headers.accept?.includes("text/html"));
+    const frontendBaseUrl =
+      process.env.CLIENT_URL ||
+      process.env.FRONTEND_URL ||
+      "http://localhost:5173";
+    const loginUrl = `${frontendBaseUrl.replace(/\/$/, "")}/Login`;
 
     if (!token) {
+      if (isHtmlRequest) {
+        return res.status(400).send(
+          renderVerificationPage({
+            success: false,
+            title: "Verification Token Missing",
+            message: "The verification link is missing a token. Please click the full link in your email.",
+            loginUrl,
+          })
+        );
+      }
       return res.status(400).json({
         success: false,
         message: "Verification token is required.",
@@ -187,6 +315,16 @@ export const verifyEmail = async (req, res) => {
     });
 
     if (!user) {
+      if (isHtmlRequest) {
+        return res.status(400).send(
+          renderVerificationPage({
+            success: false,
+            title: "Verification Link Invalid or Expired",
+            message: "This email verification link is invalid or has expired. If you have already verified, please sign in.",
+            loginUrl,
+          })
+        );
+      }
       return res.status(400).json({
         success: false,
         message: "Invalid or expired verification link.",
@@ -199,6 +337,17 @@ export const verifyEmail = async (req, res) => {
 
     await user.save();
 
+    if (isHtmlRequest) {
+      return res.status(200).send(
+        renderVerificationPage({
+          success: true,
+          title: "Email Verified Successfully!",
+          message: "Your email address has been verified. You can now sign in to your ShopEase account.",
+          loginUrl,
+        })
+      );
+    }
+
     return res.status(200).json({
       success: true,
       message: "Email verified successfully. You can now login.",
@@ -206,9 +355,112 @@ export const verifyEmail = async (req, res) => {
   } catch (error) {
     console.error("VERIFY EMAIL ERROR:", error);
 
+    const isHtmlRequest = Boolean(req.headers.accept?.includes("text/html"));
+    if (isHtmlRequest) {
+      const frontendBaseUrl =
+        process.env.CLIENT_URL ||
+        process.env.FRONTEND_URL ||
+        "http://localhost:5173";
+      const loginUrl = `${frontendBaseUrl.replace(/\/$/, "")}/Login`;
+      return res.status(500).send(
+        renderVerificationPage({
+          success: false,
+          title: "Verification Error",
+          message: "An unexpected error occurred while verifying your email. Please try again later.",
+          loginUrl,
+        })
+      );
+    }
+
     return res.status(500).json({
       success: false,
       message: "Server error while verifying email.",
+    });
+  }
+};
+
+// ==========================================
+// RESEND VERIFICATION EMAIL
+// ==========================================
+export const resendVerificationEmail = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required.",
+      });
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: "Please enter a valid email address.",
+      });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    const user = await User.findOne({ email: normalizedEmail });
+
+    // Prevent user enumeration: generic success if account does not exist
+    if (!user) {
+      return res.status(200).json({
+        success: true,
+        message:
+          "If an account exists with this email, a verification link has been sent.",
+      });
+    }
+
+    // Already verified check
+    if (user.emailVerified) {
+      return res.status(400).json({
+        success: false,
+        message: "This email address is already verified. You can proceed to login.",
+      });
+    }
+
+    // Generate fresh verification token & 24h expiration
+    const verificationToken = crypto.randomBytes(32).toString("hex");
+    const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    user.emailVerificationToken = verificationToken;
+    user.emailVerificationExpires = verificationExpires;
+    await user.save();
+
+    const backendBaseUrl = getBackendBaseUrl(req);
+    const verificationUrl =
+      `${backendBaseUrl}/api/auth/verify-email/${verificationToken}`;
+
+    const emailResult = await sendVerificationEmail({
+      to: user.email,
+      verifyUrl: verificationUrl,
+      userName: user.fullName || "Valued Customer",
+    });
+
+    if (!emailResult.success) {
+      console.error(
+        "[AUTH] Resend verification email failed:",
+        emailResult.errorCode,
+        emailResult.errorDetail || emailResult.message
+      );
+      return res.status(500).json({
+        success: false,
+        message: "Failed to send verification email. Please try again shortly.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Verification email sent successfully. Please check your inbox.",
+    });
+  } catch (error) {
+    console.error("RESEND VERIFICATION ERROR:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error while resending verification email.",
     });
   }
 };

@@ -1,7 +1,13 @@
+import path from "path";
+import { fileURLToPath } from "url";
+import mongoose from "mongoose";
 import nodemailer from "nodemailer";
 import dotenv from "dotenv";
 import SystemSetting from "../models/SystemSetting.js";
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, "../.env") });
 dotenv.config();
 
 export const createTransporter = () => {
@@ -28,16 +34,18 @@ export const maskEmailAddress = (email) => {
 
 export const getEffectiveSender = async () => {
   try {
-    const setting = await SystemSetting.findOne({ key: "email" }).lean();
-    if (setting && setting.senderEmail) {
-      const name = setting.senderName || process.env.EMAIL_FROM_NAME || "ShopEase";
-      return {
-        senderEmail: setting.senderEmail,
-        senderName: name,
-        replyToEmail: setting.replyToEmail || "",
-        fromHeader: `"${name}" <${setting.senderEmail}>`,
-        isCustom: true,
-      };
+    if (mongoose.connection?.readyState === 1) {
+      const setting = await SystemSetting.findOne({ key: "email" }).lean();
+      if (setting && setting.senderEmail) {
+        const name = setting.senderName || process.env.EMAIL_FROM_NAME || "ShopEase";
+        return {
+          senderEmail: setting.senderEmail,
+          senderName: name,
+          replyToEmail: setting.replyToEmail || "",
+          fromHeader: `"${name}" <${setting.senderEmail}>`,
+          isCustom: true,
+        };
+      }
     }
   } catch (err) {
     console.error("[EMAIL SERVICE] Error loading SystemSetting:", err.message);
@@ -166,3 +174,27 @@ export const sendTestEmail = async ({ to }) => {
   const text = `ShopEase SMTP Test - Email configuration is working!\nTimestamp: ${new Date().toISOString()}`;
   return sendEmail({ to, subject, html, text });
 };
+
+export const sendVerificationEmail = async ({ to, verifyUrl, userName = "Valued Customer" }) => {
+  const senderInfo = await getEffectiveSender();
+  const subject = "Verify your ShopEase account email";
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Verify Your Email - ShopEase</title>
+<style>body{margin:0;padding:0;font-family:sans-serif;background:#f4f6f8}.container{max-width:560px;margin:30px auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #e5e7eb}.header{background:linear-gradient(135deg,#ff6b00,#e05e00);padding:28px 24px;text-align:center;color:#fff}.content{padding:36px 32px}.footer{background:#f9fafb;padding:20px 32px;text-align:center;font-size:12px;color:#9ca3af;border-top:1px solid #e5e7eb}</style>
+</head>
+<body><div class="container">
+<div class="header"><h1 style="margin:0;font-size:26px;font-weight:800">${senderInfo.senderName || "ShopEase"}</h1><p style="margin:6px 0 0;font-size:14px;opacity:.9">Account Email Verification</p></div>
+<div class="content">
+<p style="font-size:18px;font-weight:700;color:#111827">Hello ${userName},</p>
+<p style="font-size:15px;line-height:1.6;color:#4b5563">Thank you for registering with <strong>ShopEase</strong>. Please verify your email address to activate your account and start shopping:</p>
+<div style="text-align:center;margin:32px 0"><a href="${verifyUrl}" style="display:inline-block;background:linear-gradient(135deg,#ff6b00,#e05e00);color:#fff;text-decoration:none;font-weight:700;font-size:16px;padding:14px 36px;border-radius:50px">Verify Email Address</a></div>
+<div style="background:#fffbeb;border-left:4px solid #f59e0b;padding:14px 18px;border-radius:8px;font-size:13px;color:#92400e"><strong>Notice:</strong> This verification link expires in <strong>24 hours</strong>. If you did not create a ShopEase account, you can safely ignore this email.</div>
+<p style="font-size:12px;color:#6b7280;margin-top:16px;word-break:break-all">${verifyUrl}</p>
+</div>
+<div class="footer">&copy; ${new Date().getFullYear()} ShopEase. All rights reserved.</div>
+</div></body></html>`;
+  const text = `Hello ${userName},\n\nThank you for signing up for ShopEase. Please verify your email address (valid for 24 hours) by visiting:\n\n${verifyUrl}\n\nIf you did not create an account, please ignore this email.\n\n- The ${senderInfo.senderName || "ShopEase"} Team`;
+  return sendEmail({ to, subject, html, text });
+};
+

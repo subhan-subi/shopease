@@ -166,6 +166,11 @@ export const verifyEmail = async (token) => {
   return response.data;
 };
 
+export const resendVerificationEmail = async (email) => {
+  const response = await api.post("/auth/resend-verification", { email });
+  return response.data;
+};
+
 // Fake `auth` object for 100% backward compatibility if imported as `auth.currentUser`
 export const auth = {
   get currentUser() {
